@@ -22,15 +22,17 @@
 # through this pipeline lives right here, with no runtime dependency on
 # demo_spocker/.
 #
-# Usage: bash run_pipeline_new_spocker.sh <input.pdb> <output_dir> [--keep-intermediate] [--pocket-mode sphere|fluid|both]
+# Usage: bash run_pipeline_new_spocker.sh <input.pdb> <output_dir> [--keep-intermediate] [--no-plots] [--pocket-mode sphere|fluid|both]
 #   --pocket-mode sphere  (default) original 8 A seed-sphere pockets of Script3/Script5
 #   --pocket-mode fluid   Script3b fluid pockets replace them before Script8
 #   --pocket-mode both    fields computed once, scored twice: <out>/sphere and <out>/fluid
 # Hotspots (Script1-5 outputs, sphere per-hotspot pockets) are kept in <out>/hotspots.
+# --no-plots skips the Script1/Script8 PNG figures (slow, not needed for scoring).
+# --keep-intermediate moves the work dir (all fields, raw and trimmed) to <out>/intermediate.
 # SPOCKER_WORK_DIR overrides the work dir (needed to run several PDBs in parallel).
 set -euo pipefail
 
-USAGE="Usage: $0 <input.pdb> <output_dir> [--keep-intermediate] [--pocket-mode sphere|fluid|both]"
+USAGE="Usage: $0 <input.pdb> <output_dir> [--keep-intermediate] [--no-plots] [--pocket-mode sphere|fluid|both]"
 if [[ $# -lt 2 ]]; then
     echo "$USAGE"
     exit 1
@@ -40,10 +42,12 @@ PDB_PATH=$(realpath "$1")
 OUT_DIR=$(realpath -m "$2")
 shift 2
 KEEP_INTERMEDIATE=0
+PLOT_ARGS=()
 POCKET_MODE=sphere
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --keep-intermediate) KEEP_INTERMEDIATE=1 ;;
+        --no-plots) PLOT_ARGS=(--no-plots) ;;
         --pocket-mode) POCKET_MODE="${2:-}"; shift ;;
         --pocket-mode=*) POCKET_MODE="${1#*=}" ;;
         *) echo "Unknown option: $1"; echo "$USAGE"; exit 1 ;;
@@ -72,15 +76,36 @@ WORK="${SPOCKER_WORK_DIR:-$SCRIPT_DIR/testdata/new_spocker_work}"
 rm -rf "$WORK"
 mkdir -p "$WORK"
 
+# On exit (even on failure), move the work dir next to the results when
+# --keep-intermediate is set: $WORK may be node-local scratch (SLURM
+# $TMPDIR) or get wiped by the next run.
+cleanup() {
+    if [[ "$KEEP_INTERMEDIATE" -eq 1 ]]; then
+        mkdir -p "$OUT_DIR"
+        rm -rf "$OUT_DIR/intermediate"
+        mv "$WORK" "$OUT_DIR/intermediate"
+    else
+        rm -rf "$WORK"
+    fi
+}
+trap cleanup EXIT
+
 FIELDS1_DIR="$WORK/Fields_Pipeline1_${PDB_ID}"
 FIELDS2_DIR="$WORK/Fields_Pipeline2_${PDB_ID}"
 ANALYSIS1_DIR="$WORK/Analysis_Pipeline1_${PDB_ID}"
 ANALYSIS2_DIR="$WORK/Analysis_Pipeline2_${PDB_ID}"
 
+# SPOCKER_PROFILE_DIR=<dir> profiles each step with pyinstrument (<dir>/<step>.html).
 run_step() {
     echo ">>> Running $1"
+    local name="$1"
     shift
-    python3 "$@"
+    if [[ -n "${SPOCKER_PROFILE_DIR:-}" ]]; then
+        mkdir -p "$SPOCKER_PROFILE_DIR"
+        python3 -m pyinstrument -r html -o "$SPOCKER_PROFILE_DIR/$name.html" "$@"
+    else
+        python3 "$@"
+    fi
 }
 
 echo ">>> [1/3] Generating fields (APBS, stacking, hydrophobic; HBond fields if applicable) for $PDB_ID"
@@ -92,7 +117,7 @@ fi
 
 echo ">>> [2/3] Running the Pipeline 1 hotspot / pocket-volume stages"
 run_step Script1 "$NEW_SPOCKER_DIR/Script1_Pipeline1_Slope_Derived_Fixed_Iso_Values_for_Hotspot.py" \
-    --input_dir "$FIELDS1_DIR" --pdb_id "$PDB_ID" --output_dir "$ANALYSIS1_DIR"
+    --input_dir "$FIELDS1_DIR" --pdb_id "$PDB_ID" --output_dir "$ANALYSIS1_DIR" "${PLOT_ARGS[@]}"
 run_step Script2 "$NEW_SPOCKER_DIR/Script2_Pipeline1_Detection_of_Binding_Site_Hotspots.py" \
     --fields_dir "$FIELDS1_DIR" --pdb_file "$PDB_PATH" --analysis_dir "$ANALYSIS1_DIR" --pdb_id "$PDB_ID"
 run_step Script3 "$NEW_SPOCKER_DIR/Script3_Pipeline1_Making_Pocket_Volume_Using_Hotspots.py" \
@@ -125,9 +150,9 @@ score() {
     local dest="$1"
     mkdir -p "$dest"
     echo ">>> Merging pockets and scoring ($2 pockets)"
-    run_step Script8 "$NEW_SPOCKER_DIR/Script8_Making_Unique_Pockets_Using_All_Previous_Pockets.py" \
+    run_step "Script8_$2" "$NEW_SPOCKER_DIR/Script8_Making_Unique_Pockets_Using_All_Previous_Pockets.py" \
         --analysis1_dir "$ANALYSIS1_DIR" --analysis2_dir "$ANALYSIS2_DIR" --fields_dir "$FIELDS1_DIR" \
-        --pdb_file "$PDB_PATH" --pdb_id "$PDB_ID" --output_dir "$dest" || true
+        --pdb_file "$PDB_PATH" --pdb_id "$PDB_ID" --output_dir "$dest" "${PLOT_ARGS[@]}" || true
     if [[ ! -f "$dest/${PDB_ID}_field_contributions.csv" ]]; then
         echo "!!! Script8 ($2) produced no field-contributions CSV in $dest"
         return 1
@@ -153,7 +178,4 @@ case "$POCKET_MODE" in
         else echo "!!! Script3b failed; no fluid scoring"; RC=1; fi ;;
 esac
 
-if [[ "$KEEP_INTERMEDIATE" -eq 0 ]]; then
-    rm -rf "$WORK"
-fi
 exit $RC

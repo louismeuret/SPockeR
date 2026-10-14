@@ -5,14 +5,15 @@ from pathlib import Path
 import mrcfile
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter, find_peaks
 
-plt.rcParams["font.family"] = "Times New Roman"
-plt.rcParams["font.size"] = 13
-plt.rcParams["axes.linewidth"] = 1.2
-plt.rcParams["pdf.fonttype"] = 42
-plt.rcParams["ps.fonttype"] = 42
+PLOT_RC = {
+    "font.family": "Times New Roman",
+    "font.size": 13,
+    "axes.linewidth": 1.2,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+}
 
 FIELDS = ["stacking", "hydrophobic", "apbs"]
 
@@ -391,6 +392,81 @@ def analyze_field(values, field, apbs_path=None):
     }
 
 
+def plot_analysis(pdb, cached, out_path):
+    # Imported here so --no-plots runs never pay for matplotlib.
+    import matplotlib.pyplot as plt
+
+    with plt.rc_context(PLOT_RC):
+        fig, axes = plt.subplots(3, 2, figsize=(14, 15))
+        axes = axes.flatten()
+
+        panel_order = [
+            ("stacking", "distribution"),
+            ("stacking", "derivative"),
+            ("hydrophobic", "distribution"),
+            ("hydrophobic", "derivative"),
+            ("apbs", "distribution"),
+            (None, None),
+        ]
+
+        for ax, panel in zip(axes, panel_order):
+            field, mode = panel
+
+            if field is None:
+                ax.axis("off")
+                continue
+
+            result = cached[field]
+            if result is None:
+                ax.set_title(f"{pdb} {field} ({mode}, insufficient data)")
+                ax.axis("off")
+                continue
+
+            color = FIELD_COLORS[field]
+            chosen = result["chosen"]
+
+            if mode == "distribution":
+                ax.plot(result["centers"], result["counts"] + 1, color=color, lw=2.0, label=field)
+                ax.plot(result["centers"], 10 ** result["smooth"], color="gray", lw=1.3, ls="--", label="smoothed")
+                ax.axvline(result["threshold_x"], color="purple", ls=":", lw=1.3, label=f"guide = {result['threshold_x']:.2f}")
+
+                if chosen is not None:
+                    x0 = chosen["x"]
+                    y0 = np.interp(x0, result["centers"], result["counts"] + 1)
+                    ax.axvline(x0, color="red", ls="--", lw=1.3)
+                    ax.scatter([x0], [y0], color="red", s=45, zorder=5)
+                    ax.text(x0, y0, f"{x0:.3f}", fontsize=10, color="red", ha="left", va="bottom")
+
+                ax.set_title(f"{pdb} {field} distribution")
+                ax.set_xlabel("Field value")
+                ax.set_ylabel("Count (+1)")
+                ax.set_yscale("log")
+                ax.grid(alpha=0.3)
+                ax.legend(fontsize=9)
+
+            elif mode == "derivative":
+                ax.plot(result["centers"], result["deriv1"], color="royalblue", lw=2.0, label="1st derivative")
+                ax.axhline(0.0, color="gray", ls=":", lw=1.0)
+                ax.axvline(result["threshold_x"], color="purple", ls=":", lw=1.3, label=f"guide = {result['threshold_x']:.2f}")
+
+                if chosen is not None:
+                    x0 = chosen["x"]
+                    y0 = np.interp(x0, result["centers"], result["deriv1"])
+                    ax.axvline(x0, color="red", ls="--", lw=1.3)
+                    ax.scatter([x0], [y0], color="red", s=45, zorder=5)
+                    ax.text(x0, y0, f"{x0:.3f}", fontsize=10, color="red", ha="left", va="top")
+
+                ax.set_title(f"{pdb} {field} derivative")
+                ax.set_xlabel("Field value")
+                ax.set_ylabel("d/dx log-count")
+                ax.grid(alpha=0.3)
+                ax.legend(fontsize=9)
+
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+
 # =====================================================================
 # SINGLE-PDB DRIVER (generalized — replaces the old multi-PDB BASE loop)
 # =====================================================================
@@ -413,6 +489,11 @@ def main():
         default=None,
         help="Output folder where results for this PDB will be saved. "
              "Default: Analysis_Pipeline1_<pdb_id> in the current working directory.",
+    )
+    parser.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Skip the <pdb_id>_stk_hp_ele_analysis.png figure.",
     )
     args = parser.parse_args()
 
@@ -441,18 +522,6 @@ def main():
     summary_rows = []
     iso_rows = []
 
-    fig, axes = plt.subplots(3, 2, figsize=(14, 15))
-    axes = axes.flatten()
-
-    panel_order = [
-        ("stacking", "distribution"),
-        ("stacking", "derivative"),
-        ("hydrophobic", "distribution"),
-        ("hydrophobic", "derivative"),
-        ("apbs", "distribution"),
-        (None, None),
-    ]
-
     selected = {
         "pdb": pdb,
         "stacking_iso": np.nan,
@@ -475,73 +544,20 @@ def main():
         else:
             cached[field] = None
 
-    for ax, panel in zip(axes, panel_order):
-        field, mode = panel
-
-        if field is None:
-            ax.axis("off")
+    for field in FIELDS:
+        chosen = cached[field]["chosen"] if cached[field] is not None else None
+        if chosen is None:
             continue
+        selected[f"{field}_iso"] = chosen["x"]
+        if field == "apbs":
+            selected["apbs_method"] = chosen.get("method")
+            selected["apbs_peak_rank"] = chosen.get("peak_rank", np.nan)
+            selected["apbs_n_candidate_peaks"] = chosen.get("n_candidate_peaks", np.nan)
+            selected["apbs_raw_count"] = chosen.get("raw_count", np.nan)
 
-        result = cached[field]
-        if result is None:
-            ax.set_title(f"{pdb} {field} ({mode}, insufficient data)")
-            ax.axis("off")
-            continue
+    if not args.no_plots:
+        plot_analysis(pdb, cached, out_dir / f"{pdb}_stk_hp_ele_analysis.png")
 
-        color = FIELD_COLORS[field]
-        chosen = result["chosen"]
-
-        if mode == "distribution":
-            ax.plot(result["centers"], result["counts"] + 1, color=color, lw=2.0, label=field)
-            ax.plot(result["centers"], 10 ** result["smooth"], color="gray", lw=1.3, ls="--", label="smoothed")
-            ax.axvline(result["threshold_x"], color="purple", ls=":", lw=1.3, label=f"guide = {result['threshold_x']:.2f}")
-
-            if chosen is not None:
-                x0 = chosen["x"]
-                y0 = np.interp(x0, result["centers"], result["counts"] + 1)
-                ax.axvline(x0, color="red", ls="--", lw=1.3)
-                ax.scatter([x0], [y0], color="red", s=45, zorder=5)
-                ax.text(x0, y0, f"{x0:.3f}", fontsize=10, color="red", ha="left", va="bottom")
-
-                if field == "stacking":
-                    selected["stacking_iso"] = x0
-                elif field == "hydrophobic":
-                    selected["hydrophobic_iso"] = x0
-                elif field == "apbs":
-                    selected["apbs_iso"] = x0
-                    selected["apbs_method"] = chosen.get("method")
-                    selected["apbs_peak_rank"] = chosen.get("peak_rank", np.nan)
-                    selected["apbs_n_candidate_peaks"] = chosen.get("n_candidate_peaks", np.nan)
-                    selected["apbs_raw_count"] = chosen.get("raw_count", np.nan)
-
-            ax.set_title(f"{pdb} {field} distribution")
-            ax.set_xlabel("Field value")
-            ax.set_ylabel("Count (+1)")
-            ax.set_yscale("log")
-            ax.grid(alpha=0.3)
-            ax.legend(fontsize=9)
-
-        elif mode == "derivative":
-            ax.plot(result["centers"], result["deriv1"], color="royalblue", lw=2.0, label="1st derivative")
-            ax.axhline(0.0, color="gray", ls=":", lw=1.0)
-            ax.axvline(result["threshold_x"], color="purple", ls=":", lw=1.3, label=f"guide = {result['threshold_x']:.2f}")
-
-            if chosen is not None:
-                x0 = chosen["x"]
-                y0 = np.interp(x0, result["centers"], result["deriv1"])
-                ax.axvline(x0, color="red", ls="--", lw=1.3)
-                ax.scatter([x0], [y0], color="red", s=45, zorder=5)
-                ax.text(x0, y0, f"{x0:.3f}", fontsize=10, color="red", ha="left", va="top")
-
-            ax.set_title(f"{pdb} {field} derivative")
-            ax.set_xlabel("Field value")
-            ax.set_ylabel("d/dx log-count")
-            ax.grid(alpha=0.3)
-            ax.legend(fontsize=9)
-
-    fig.tight_layout()
-    fig.savefig(out_dir / f"{pdb}_stk_hp_ele_analysis.png", dpi=300, bbox_inches="tight")
-    plt.close(fig)
 
     for field in FIELDS:
         result = cached[field]

@@ -118,20 +118,18 @@ import shlex
 
 import mrcfile
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 from scipy.spatial import cKDTree
 
 # -------------------------------------------------
 # GLOBAL FONT: Times New Roman throughout all plots (UNCHANGED)
 # -------------------------------------------------
-matplotlib.rcParams["font.family"]      = "Times New Roman"
-matplotlib.rcParams["mathtext.fontset"] = "custom"
-matplotlib.rcParams["mathtext.rm"]      = "Times New Roman"
-matplotlib.rcParams["mathtext.it"]      = "Times New Roman:italic"
-matplotlib.rcParams["mathtext.bf"]      = "Times New Roman:bold"
+PLOT_RC = {
+    "font.family":      "Times New Roman",
+    "mathtext.fontset": "custom",
+    "mathtext.rm":      "Times New Roman",
+    "mathtext.it":      "Times New Roman:italic",
+    "mathtext.bf":      "Times New Roman:bold",
+}
 
 # -------------------------------------------------
 # PARAMETERS
@@ -1250,36 +1248,43 @@ def generate_field_contribution_plot(unique_pockets, pocket_field_integrals,
             row.append(integral / norm_c if norm_c > 0.0 else 0.0)
         data_matrix.append(row)
 
-    fig, ax = plt.subplots(figsize=(max(10, n * 1.6 + 2), 6), dpi=300)
-    bottoms = np.zeros(n)
-    patches = []
-    for col_idx, fname in enumerate(FIELD_NAMES_CSV):
-        heights = np.array([data_matrix[pi][col_idx] for pi in range(n)])
-        color = FIELD_COLORS.get(fname, "#888888")
-        disp = FIELD_LABELS_DISPLAY.get(fname, fname)
-        ax.bar(x, heights, width, bottom=bottoms, color=color,
-               edgecolor="white", linewidth=0.4)
-        patches.append(mpatches.Patch(color=color, label=disp))
-        bottoms += heights
+    # Imported here so --no-plots runs never pay for matplotlib.
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(pocket_names, fontsize=11, rotation=0, ha="center",
-                       fontfamily="Times New Roman")
-    ax.tick_params(axis="y", labelsize=11)
-    ax.set_xlabel("Unique Pockets", fontsize=13, labelpad=8,
-                  fontfamily="Times New Roman")
-    ax.set_ylabel("Weightage of Each Field", fontsize=13, labelpad=8,
-                  fontfamily="Times New Roman")
-    ax.yaxis.get_major_formatter().set_powerlimits((-3, 3))
-    ax.legend(handles=patches, loc="upper right", framealpha=0.85,
-              fontsize=10, ncol=3, bbox_to_anchor=(1.0, 1.15),
-              prop={"family": "Times New Roman"})
-    ax.set_xlim(-0.5, n - 0.5)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    fig.tight_layout()
-    fig.savefig(str(out_path), dpi=300, bbox_inches="tight")
-    plt.close(fig)
+    with plt.rc_context(PLOT_RC):
+        fig, ax = plt.subplots(figsize=(max(10, n * 1.6 + 2), 6), dpi=300)
+        bottoms = np.zeros(n)
+        patches = []
+        for col_idx, fname in enumerate(FIELD_NAMES_CSV):
+            heights = np.array([data_matrix[pi][col_idx] for pi in range(n)])
+            color = FIELD_COLORS.get(fname, "#888888")
+            disp = FIELD_LABELS_DISPLAY.get(fname, fname)
+            ax.bar(x, heights, width, bottom=bottoms, color=color,
+                   edgecolor="white", linewidth=0.4)
+            patches.append(mpatches.Patch(color=color, label=disp))
+            bottoms += heights
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(pocket_names, fontsize=11, rotation=0, ha="center",
+                           fontfamily="Times New Roman")
+        ax.tick_params(axis="y", labelsize=11)
+        ax.set_xlabel("Unique Pockets", fontsize=13, labelpad=8,
+                      fontfamily="Times New Roman")
+        ax.set_ylabel("Weightage of Each Field", fontsize=13, labelpad=8,
+                      fontfamily="Times New Roman")
+        ax.yaxis.get_major_formatter().set_powerlimits((-3, 3))
+        ax.legend(handles=patches, loc="upper right", framealpha=0.85,
+                  fontsize=10, ncol=3, bbox_to_anchor=(1.0, 1.15),
+                  prop={"family": "Times New Roman"})
+        ax.set_xlim(-0.5, n - 0.5)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        fig.tight_layout()
+        fig.savefig(str(out_path), dpi=300, bbox_inches="tight")
+        plt.close(fig)
     print(f"  [Plot]  Saved: {out_path}")
 
 
@@ -1392,6 +1397,10 @@ def main():
         help="Optional override for the PDB identifier used in filenames. "
              "If not provided, it is automatically derived from --pdb_file "
              "(filename without extension)."
+    )
+    parser.add_argument(
+        "--no-plots", action="store_true",
+        help="Skip the <pdb_id>_field_contributions.png chart."
     )
     args = parser.parse_args()
 
@@ -1570,7 +1579,8 @@ def main():
     except Exception as e:
         print(f"  [ERROR] Writing CSV: {e}")
 
-    if unique_pockets and any(pfi for pfi in pocket_field_integrals):
+    if (not args.no_plots and unique_pockets
+            and any(pfi for pfi in pocket_field_integrals)):
         plot_path = output_dir / f"{pdb}_field_contributions.png"
         try:
             generate_field_contribution_plot(
